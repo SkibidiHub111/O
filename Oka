@@ -9,10 +9,10 @@ ROBLOX_PKG="com.roblox.client"
 DEFAULT_PACKAGE_NAME="banana.Tool"
 AFTER_LAUNCH_SLEEP=15
 OPEN_INTERVAL_DEFAULT=5
+PACKAGE_LAUNCH_DELAY=3
 
 mkdir -p "$DATA_DIR" "$DOWNLOADS_DIR"
-[[ -f "$DATA_FILE" ]] || echo "[]" > "$DATA_FILE"
-[[ -f "$COOKIE_FILE" ]] || touch "$COOKIE_FILE"
+[[ -f "$DATA_FILE" ]] || echo "[]" >"$DATA_FILE"
 
 SELECTED=()
 SELECTED_NAMES=()
@@ -39,12 +39,10 @@ safe_list_all_apps(){
     fi
 }
 
-read_json(){ [[ ! -f "$DATA_FILE" ]] && echo "[]" > "$DATA_FILE"; cat "$DATA_FILE"; }
-read_cookie(){ [[ ! -f "$COOKIE_FILE" ]] && touch "$COOKIE_FILE"; cat "$COOKIE_FILE"; }
-
 add_packages_from_installed(){
     mapfile -t apps < <(safe_list_all_apps)
     (( ${#apps[@]} == 0 )) && { echo "No user apps found."; return; }
+    echo "Installed apps:"
     for i in "${!apps[@]}"; do
         printf "[%d] %s\n" "$((i+1))" "${apps[i]}"
     done
@@ -52,15 +50,19 @@ add_packages_from_installed(){
     read -rp "> " sel
     [[ "$sel" == "0" ]] && return
     IFS=',' read -ra nums <<< "$sel"
+
     read -rp "Use same PlaceId/JobId for all? (y/N): " batch
     batch=${batch,,}
-    current=$(read_json)
+
+    current=$(cat "$DATA_FILE")
     for n in "${nums[@]}"; do
         (( n<=0 || n>${#apps[@]} )) && { echo "Invalid index: $n"; continue; }
         idx=$((n-1))
         pkg="${apps[$idx]}"
+
         read -rp "Label for $pkg (default: $pkg): " name
         name=${name:-$pkg}
+
         if [[ "$batch" == "y" ]]; then
             [[ -z "$placeIdAll" ]] && read -rp "PlaceId for all: " placeIdAll
             [[ -z "$jobIdAll" ]] && read -rp "Optional JobId for all: " jobIdAll
@@ -70,8 +72,10 @@ add_packages_from_installed(){
             read -rp "PlaceId: " placeId
             read -rp "Optional JobId: " jobId
         fi
+
         read -rp "Package identifier (default: ${DEFAULT_PACKAGE_NAME}): " pkg_input
         pkg_input=${pkg_input:-$DEFAULT_PACKAGE_NAME}
+
         new=$(jq --arg n "$name" --arg p "$placeId" --arg j "$jobId" --arg pkg "$pkg_input" \
             '. + [{name:$n,placeId:$p,jobId:$j,package:$pkg}]' <<<"$current")
         echo "$new" > "$DATA_FILE"
@@ -109,6 +113,7 @@ select_packages(){
     ((len==0)) && { echo "No packages available. Add first."; return; }
     SELECTED=()
     SELECTED_NAMES=()
+    echo "Available packages:"
     list_packages
     echo "Enter indices (1 or more). 0 when done."
     while true; do
@@ -141,17 +146,24 @@ login_cookie_only(){
 }
 
 login_to_app_with_cookie(){
-    cookie=$(read_cookie)
+    if [[ ! -f "$COOKIE_FILE" ]]; then
+        echo "Missing cookie file. Run menu 7 first."
+        return 1
+    fi
+    cookie=$(<"$COOKIE_FILE")
     response=$(curl -s -H "Cookie: .ROBLOSECURITY=$cookie" "https://users.roblox.com/v1/users/authenticated" || true)
     name=$(jq -r '.name // empty' <<<"$response")
-    [[ -n "$name" ]] || { echo "Invalid cookie. Please relogin."; return 1; }
-    echo "Logged in as $name (cookie valid)."
+    if [[ -n "$name" ]]; then
+        echo "Logged in as $name (cookie valid)."
+    else
+        echo "Invalid cookie. Please relogin."
+        return 1
+    fi
 }
 
-start_rejoin_loop(){
-    [[ ${#SELECTED[@]} -eq 0 ]] && { echo "Select packages first (menu 4)."; return; }
-    login_to_app_with_cookie || return
-    trap 'echo -e "\nStopping rejoin..."; exit 0' INT
+rejoin_loop(){
+    local use_cookie=$1
+    trap 'echo -e "\nStopping rejoin..."; return' INT
     while true; do
         for idx in "${SELECTED[@]}"; do
             name=$(jq -r ".[$idx].name" "$DATA_FILE")
@@ -163,38 +175,18 @@ start_rejoin_loop(){
             if pidof "$pkg" >/dev/null; then
                 echo "[$(date '+%H:%M:%S')] [$name] Roblox running..."
             else
-                echo "[$(date '+%H:%M:%S')] [$name] Roblox closed → opening app & joining..."
-                am start -n "$pkg/com.roblox.client.startup.ActivityStart" >/dev/null 2>&1
-                sleep 3
-                am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+                if [[ "$use_cookie" == "1" ]]; then
+                    echo "[$(date '+%H:%M:%S')] [$name] Roblox closed → opening app with cookie..."
+                    am start -n "$pkg/com.roblox.client.startup.ActivityStart" >/dev/null 2>&1
+                    sleep "$PACKAGE_LAUNCH_DELAY"
+                    am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+                else
+                    echo "[$(date '+%H:%M:%S')] [$name] Roblox closed → joining..."
+                    am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+                fi
                 sleep "$AFTER_LAUNCH_SLEEP"
             fi
         done
-        sleep "$OPEN_INTERVAL_DEFAULT"
-    done
-}
-
-start_rejoin_loop_no_cookie(){
-    read -rp "Enter PlaceId: " placeId
-    [[ -z "$placeId" ]] && { echo "PlaceId required."; return; }
-    read -rp "Link Server Vip (press Enter if none): " jobId
-    mapfile -t apps < <(safe_list_all_apps)
-    for i in "${!apps[@]}"; do
-        printf "[%d] %s\n" "$((i+1))" "${apps[i]}"
-    done
-    read -rp "Select package index: " pkg_index
-    ((pkg_index<=0 || pkg_index>${#apps[@]})) && { echo "Invalid index."; return; }
-    package="${apps[$((pkg_index-1))]}"
-    trap 'echo -e "\nStopping rejoin..."; exit 0' INT
-    while true; do
-        if pidof "$package" >/dev/null; then
-            echo "[$(date '+%H:%M:%S')] Roblox running..."
-        else
-            url="robloxmobile://placeId=$placeId"
-            [[ -n "$jobId" ]] && url="$url&launchData=$jobId"
-            am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
-            sleep "$AFTER_LAUNCH_SLEEP"
-        fi
         sleep "$OPEN_INTERVAL_DEFAULT"
     done
 }
@@ -217,22 +209,5 @@ main_menu(){
         2) list_packages ;;
         3) remove_package ;;
         4) select_packages ;;
-        5) start_rejoin_loop ;;
-        6) start_rejoin_loop_no_cookie ;;
-        7) login_cookie_only ;;
-        0) echo "Bye"; exit 0 ;;
-        *) echo "Invalid";;
-    esac
-}
-
-for dep in jq curl pm; do
-    if ! has_cmd "$dep"; then
-        pkg install -y "$dep"
-    fi
-done
-
-while true; do
-    main_menu
-    echo
-    read -rp "Press Enter to return to menu..."
-done
+        5) login_to_app_with_cookie && rejoin_loop 1 ;;
+        6) rejoin_loop 0 ;;
