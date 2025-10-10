@@ -3,37 +3,33 @@ set -euo pipefail
 
 DATA_DIR="${HOME}/.rejoin_tool"
 DATA_FILE="${DATA_DIR}/packages.json"
-COOKIE_DIR="${DATA_DIR}/cookies"
 DOWNLOADS_DIR="${HOME}/storage/downloads"
 COOKIE_FILE="${DOWNLOADS_DIR}/cookie.txt"
+ROBLOX_PKG="com.roblox.client"
+DEFAULT_PACKAGE_NAME="banana.Tool"
+AFTER_LAUNCH_SLEEP=15
+OPEN_INTERVAL_DEFAULT=5
 
-mkdir -p "$DATA_DIR" "$COOKIE_DIR" "$DOWNLOADS_DIR"
+mkdir -p "$DATA_DIR" "$DOWNLOADS_DIR"
 [[ -f "$DATA_FILE" ]] || echo "[]" >"$DATA_FILE"
 
 SELECTED=()
 SELECTED_NAMES=()
-DEFAULT_PACKAGE_NAME="banana.Tool"
-ROBLOX_PKG="com.roblox.client"
-AFTER_LAUNCH_SLEEP=15
-OPEN_INTERVAL_DEFAULT=5
 
-# ====== UI ======
 print_banner(){
-echo -e "\e[34m
+echo -e "\e[36m
  ____    _    _   _ _   _ _   _ 
 | __ )  / \\  | \\ | | \\ | | \\ | |
 |  _ \\ / _ \\ |  \\| |  \\| |  \\| |
 | |_) / ___ \\| |\\  | |\\  | |\\  |
 |____/_/   \\_\\_| \\_|_| \\_|_| \\_|
 \e[0m"
-echo -e "\e[33m                 banana.Tool v23\e[0m"
+echo -e "\e[33m            banana.Tool made by baor\e[0m"
 }
 
-# ====== UTIL ======
 has_cmd(){ command -v "$1" >/dev/null 2>&1; }
 json_len(){ jq 'length' "$DATA_FILE" 2>/dev/null || echo 0; }
 
-# SAFE LIST PACKAGE WITHOUT ROOT
 safe_list_all_apps(){
     if has_cmd pm; then
         pm list packages -3 2>/dev/null | sed 's/package://g' || true
@@ -42,37 +38,33 @@ safe_list_all_apps(){
     fi
 }
 
-# ====== PACKAGE MANAGEMENT ======
 add_packages_from_installed(){
     mapfile -t apps < <(safe_list_all_apps)
     (( ${#apps[@]} == 0 )) && { echo "No user apps found."; return; }
-
+    echo "Installed apps:"
     for i in "${!apps[@]}"; do
-        echo "[$i] ${apps[i]}"
+        printf "[%d] %s\n" "$((i+1))" "${apps[i]}"
     done
-    read -rp "Select app numbers (comma-separated, 0 cancel): " sel
+    echo "Enter indices (comma-separated), 0 to cancel."
+    read -rp "> " sel
     [[ "$sel" == "0" ]] && return
-
     IFS=',' read -ra nums <<< "$sel"
     current=$(cat "$DATA_FILE")
-
     for n in "${nums[@]}"; do
-        [[ ! "$n" =~ ^[0-9]+$ ]] && { echo "Invalid index: $n"; continue; }
-        (( n<0 || n>=${#apps[@]} )) && { echo "Index $n out of range"; continue; }
-        pkg="${apps[$n]}"
+        (( n<=0 || n>${#apps[@]} )) && { echo "Invalid index: $n"; continue; }
+        idx=$((n-1))
+        pkg="${apps[$idx]}"
         read -rp "Label for $pkg (default: $pkg): " name
         name=${name:-$pkg}
         read -rp "PlaceId: " placeId
         read -rp "Optional JobId: " jobId
         read -rp "Package identifier (default: ${DEFAULT_PACKAGE_NAME}): " pkg_input
         pkg_input=${pkg_input:-$DEFAULT_PACKAGE_NAME}
-
         new=$(jq --arg n "$name" --arg p "$placeId" --arg j "$jobId" --arg pkg "$pkg_input" \
             '. + [{name:$n,placeId:$p,jobId:$j,package:$pkg}]' <<<"$current")
-
         echo "$new" > "$DATA_FILE"
         current="$new"
-        echo "Added: $name | $pkg_input | place:$placeId | job:${jobId:-<none>}"
+        echo "Added: $name | pkg:$pkg_input | place:$placeId | job:${jobId:-<none>}"
     done
 }
 
@@ -84,7 +76,7 @@ list_packages(){
         p=$(jq -r ".[$i].placeId" "$DATA_FILE")
         j=$(jq -r ".[$i].jobId // \"<none>\"" "$DATA_FILE")
         pkg=$(jq -r ".[$i].package // \"<none>\"" "$DATA_FILE")
-        echo "[$i] $n | place:$p | job:$j | pkg:$pkg"
+        printf "[%d] %s | place:%s | job:%s | pkg:%s\n" "$((i+1))" "$n" "$p" "$j" "$pkg"
     done
 }
 
@@ -92,10 +84,10 @@ remove_package(){
     list_packages
     read -rp "Index to remove: " idx
     [[ -z "$idx" ]] && return
-    [[ ! "$idx" =~ ^[0-9]+$ ]] && { echo "Invalid"; return; }
+    (( idx<=0 )) && { echo "Invalid index."; return; }
     len=$(json_len)
-    (( idx<0 || idx>=len )) && { echo "Out of range"; return; }
-    tmp=$(jq "del(.[$idx])" "$DATA_FILE")
+    (( idx>len )) && { echo "Out of range."; return; }
+    tmp=$(jq "del(.[$((idx-1))])" "$DATA_FILE")
     echo "$tmp" > "$DATA_FILE"
     echo "Removed index $idx"
 }
@@ -107,107 +99,150 @@ select_packages(){
     SELECTED_NAMES=()
     echo "Available packages:"
     list_packages
-    echo "Enter indices one by one. Enter 0 when done."
+    echo "Enter indices (1 or more). 0 when done."
     while true; do
         read -rp "Index: " i
         [[ "$i" == "0" ]] && break
-        if [[ "$i" =~ ^[0-9]+$ ]] && (( i>=0 && i<len )); then
-            SELECTED+=("$i")
-            name=$(jq -r ".[$i].name" "$DATA_FILE")
+        if [[ "$i" =~ ^[0-9]+$ ]] && (( i>0 && i<=len )); then
+            idx=$((i-1))
+            SELECTED+=("$idx")
+            name=$(jq -r ".[$idx].name" "$DATA_FILE")
             SELECTED_NAMES+=("$name")
             echo "Added: $name"
         else
             echo "Invalid index, try again."
         fi
     done
-    echo "Selected packages: ${SELECTED_NAMES[*]}"
+    echo "Selected: ${SELECTED_NAMES[*]:-<none>}"
 }
 
-# ====== REJOIN LOGIC ======
-is_roblox_running(){ pidof "$ROBLOX_PKG" >/dev/null 2>&1; }
-get_cpu_ram(){
-    local cpu=$(top -n 1 | awk '/%cpu/{print $2; exit}' 2>/dev/null || echo "0")
-    local mem=$(free | awk '/Mem/{printf "%.1f", $3/$2*100}' 2>/dev/null || echo "0")
-    echo "CPU: ${cpu}% | RAM: ${mem}%"
+login_cookie_only(){
+    echo "Enter Roblox cookie:"
+    read -rp "Cookie: " rcookie
+    echo "$rcookie" > "$COOKIE_FILE"
+    echo "Validating..."
+    response=$(curl -s -H "Cookie: .ROBLOSECURITY=$rcookie" "https://users.roblox.com/v1/users/authenticated" || true)
+    name=$(jq -r '.name // empty' <<<"$response")
+    if [[ -n "$name" ]]; then
+        echo "Cookie valid. Logged in as $name."
+    else
+        echo "Invalid cookie."
+    fi
 }
 
-open_app(){ local url="$1"; am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1 || true; }
-kill_roblox(){ am force-stop "$ROBLOX_PKG" >/dev/null 2>&1 || true; }
+# New: login and open Roblox app automatically with cookie
+login_to_app_with_cookie(){
+    if [[ ! -f "$COOKIE_FILE" ]]; then
+        echo "Missing cookie file. Run menu 7 first."
+        return 1
+    fi
+    cookie=$(<"$COOKIE_FILE")
+    response=$(curl -s -H "Cookie: .ROBLOSECURITY=$cookie" "https://users.roblox.com/v1/users/authenticated" || true)
+    name=$(jq -r '.name // empty' <<<"$response")
+    if [[ -n "$name" ]]; then
+        echo "Logged in as $name (cookie valid)."
+    else
+        echo "Invalid cookie. Please relogin."
+        return 1
+    fi
+}
 
-start_rejoin(){
-    (( ${#SELECTED[@]} == 0 )) && { echo "No packages selected. Use option 5."; return; }
-    read -rp "Interval seconds between checks [default ${OPEN_INTERVAL_DEFAULT}]: " interval
-    interval=${interval:-$OPEN_INTERVAL_DEFAULT}
+start_rejoin_loop(){
+    [[ ${#SELECTED[@]} -eq 0 ]] && { echo "Select packages first (menu 4)."; return; }
 
-    echo "Starting auto-rejoin loop... Ctrl+C to stop."
-    trap 'echo -e "\nStopping all loops..."; exit 0' INT
+    login_to_app_with_cookie || return
+
+    echo -e "\nStarting rejoin loop..."
+    trap 'echo -e "\nStopping rejoin..."; exit 0' INT
 
     while true; do
         for idx in "${SELECTED[@]}"; do
-            len=$(json_len)
-            (( idx>=0 && idx<len )) || continue
             name=$(jq -r ".[$idx].name" "$DATA_FILE")
             placeId=$(jq -r ".[$idx].placeId" "$DATA_FILE")
             jobId=$(jq -r ".[$idx].jobId // \"\"" "$DATA_FILE")
-            [[ -z "$placeId" ]] && continue
+            pkg=$(jq -r ".[$idx].package // \"$ROBLOX_PKG\"" "$DATA_FILE")
 
-            cpu_ram=$(get_cpu_ram)
-            if ! is_roblox_running; then
-                echo "[$(date '+%H:%M:%S')] [$name] | Roblox not running → starting..."
-                placeId_clean=$(echo "$placeId" | sed 's/^0*//')
-                url="roblox://experiences/start?placeId=$placeId_clean"
-                [[ -n "$jobId" ]] && url="$url&gameInstanceId=$jobId"
-                open_app "$url"
-                sleep "$AFTER_LAUNCH_SLEEP"
+            url="robloxmobile://placeId=$placeId"
+            [[ -n "$jobId" ]] && url="$url&launchData=$jobId"
+
+            if pidof "$pkg" >/dev/null; then
+                echo "[$(date '+%H:%M:%S')] [$name] Roblox running..."
             else
-                echo "[$(date '+%H:%M:%S')] [$name] | Running | $cpu_ram"
+                echo "[$(date '+%H:%M:%S')] [$name] Roblox closed → logging in + rejoining..."
+                am start -n "$pkg/com.roblox.client.startup.ActivityStart" >/dev/null 2>&1
+                sleep 3
+                am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+                sleep "$AFTER_LAUNCH_SLEEP"
             fi
         done
-        sleep "$interval"
+        sleep "$OPEN_INTERVAL_DEFAULT"
     done
 }
 
-login_cookie(){
-    [[ ! -f "$COOKIE_FILE" ]] && touch "$COOKIE_FILE"
-    read -rp "Enter Roblox cookie: " rcookie
-    echo "$rcookie" > "$COOKIE_FILE"
-    echo "Cookie saved."
-    len=$(json_len)
-    if (( len == 1 )); then
-        SELECTED=(0)
-        SELECTED_NAMES=($(jq -r ".[$SELECTED[0]].name" "$DATA_FILE"))
-        echo "Single package found. Auto-selected: ${SELECTED_NAMES[*]}"
-    else
-        echo "Multiple packages detected. Use option 5 to select one or more."
-    fi
-    start_rejoin
+start_rejoin_loop_no_cookie(){
+    echo "Starting rejoin..."
+    read -rp "Enter PlaceId: " placeId
+    [[ -z "$placeId" ]] && { echo "PlaceId required."; return; }
+    read -rp "Link Server Vip (press Enter if none): " jobId
+
+    echo -e "\nInstalled Roblox apps:"
+    mapfile -t apps < <(safe_list_all_apps)
+    for i in "${!apps[@]}"; do
+        printf "[%d] %s\n" "$((i+1))" "${apps[i]}"
+    done
+    read -rp "Select package index: " pkg_index
+    ((pkg_index<=0 || pkg_index>${#apps[@]})) && { echo "Invalid index."; return; }
+    package="${apps[$((pkg_index-1))]}"
+    echo "Selected package: $package"
+
+    echo -e "\nRejoin started for $package"
+    trap 'echo -e "\nStopping rejoin..."; exit 0' INT
+    while true; do
+        if pidof "$package" >/dev/null; then
+            echo "[$(date '+%H:%M:%S')] Roblox running..."
+        else
+            echo "[$(date '+%H:%M:%S')] Roblox closed  rejoining..."
+            url="robloxmobile://placeId=$placeId"
+            [[ -n "$jobId" ]] && url="$url&launchData=$jobId"
+            am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+            sleep "$AFTER_LAUNCH_SLEEP"
+        fi
+        sleep "$OPEN_INTERVAL_DEFAULT"
+    done
 }
 
-# ====== MENU LOOP ======
 main_menu(){
     clear
     print_banner
     echo "Selected packages: ${SELECTED_NAMES[*]:-<none>}"
-    echo "1) Start auto-rejoin"
-    echo "2) Add packages from installed apps"
-    echo "3) List packages"
-    echo "4) Remove package"
-    echo "5) Select packages"
-    echo "6) Login via cookie"
+    echo "1) Add packages"
+    echo "2) List packages"
+    echo "3) Remove package"
+    echo "4) Select packages"
+    echo "5) Start auto-rejoin (with cookie login)"
+    echo "6) Start auto-rejoin (no cookie)"
+    echo "7) Login cookie"
     echo "0) Exit"
-    echo
     read -rp "Choice: " choice
     case "$choice" in
-        1) start_rejoin ;;
-        2) add_packages_from_installed ;;
-        3) list_packages ;;
-        4) remove_package ;;
-        5) select_packages ;;
-        6) login_cookie ;;
+        1) add_packages_from_installed ;;
+        2) list_packages ;;
+        3) remove_package ;;
+        4) select_packages ;;
+        5) start_rejoin_loop ;;
+        6) start_rejoin_loop_no_cookie ;;
+        7) login_cookie_only ;;
         0) echo "Bye"; exit 0 ;;
         *) echo "Invalid";;
     esac
 }
+
+for dep in jq curl pm; do
+    if ! has_cmd "$dep"; then
+        echo "Installing missing dependency: $dep"
+        pkg install -y "$dep"
+    fi
+done
 
 while true; do
     main_menu
