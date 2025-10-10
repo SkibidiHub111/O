@@ -38,6 +38,7 @@ safe_list_all_apps(){
     fi
 }
 
+# ------------------ ADD PACKAGE ------------------
 add_packages_from_installed(){
     mapfile -t apps < <(safe_list_all_apps)
     (( ${#apps[@]} == 0 )) && { echo "No user apps found."; return; }
@@ -45,21 +46,36 @@ add_packages_from_installed(){
     for i in "${!apps[@]}"; do
         printf "[%d] %s\n" "$((i+1))" "${apps[i]}"
     done
-    echo "Enter indices (comma-separated), 0 to cancel."
+    echo "Enter indices to add (comma-separated), 0 to cancel:"
     read -rp "> " sel
     [[ "$sel" == "0" ]] && return
     IFS=',' read -ra nums <<< "$sel"
+
+    read -rp "Use same PlaceId/JobId for all? (y/N): " batch
+    batch=${batch,,}
+
     current=$(cat "$DATA_FILE")
     for n in "${nums[@]}"; do
         (( n<=0 || n>${#apps[@]} )) && { echo "Invalid index: $n"; continue; }
         idx=$((n-1))
         pkg="${apps[$idx]}"
+
         read -rp "Label for $pkg (default: $pkg): " name
         name=${name:-$pkg}
-        read -rp "PlaceId: " placeId
-        read -rp "Optional JobId: " jobId
+
+        if [[ "$batch" == "y" ]]; then
+            [[ -z "$placeIdAll" ]] && read -rp "PlaceId for all: " placeIdAll
+            [[ -z "$jobIdAll" ]] && read -rp "Optional JobId for all: " jobIdAll
+            placeId="$placeIdAll"
+            jobId="$jobIdAll"
+        else
+            read -rp "PlaceId: " placeId
+            read -rp "Optional JobId: " jobId
+        fi
+
         read -rp "Package identifier (default: ${DEFAULT_PACKAGE_NAME}): " pkg_input
         pkg_input=${pkg_input:-$DEFAULT_PACKAGE_NAME}
+
         new=$(jq --arg n "$name" --arg p "$placeId" --arg j "$jobId" --arg pkg "$pkg_input" \
             '. + [{name:$n,placeId:$p,jobId:$j,package:$pkg}]' <<<"$current")
         echo "$new" > "$DATA_FILE"
@@ -116,6 +132,7 @@ select_packages(){
     echo "Selected: ${SELECTED_NAMES[*]:-<none>}"
 }
 
+# ------------------ COOKIE LOGIN ------------------
 login_cookie_only(){
     echo "Enter Roblox cookie:"
     read -rp "Cookie: " rcookie
@@ -130,7 +147,6 @@ login_cookie_only(){
     fi
 }
 
-# New: login and open Roblox app automatically with cookie
 login_to_app_with_cookie(){
     if [[ ! -f "$COOKIE_FILE" ]]; then
         echo "Missing cookie file. Run menu 7 first."
@@ -147,6 +163,7 @@ login_to_app_with_cookie(){
     fi
 }
 
+# ------------------ START REJOIN ------------------
 start_rejoin_loop(){
     [[ ${#SELECTED[@]} -eq 0 ]] && { echo "Select packages first (menu 4)."; return; }
 
@@ -168,7 +185,7 @@ start_rejoin_loop(){
             if pidof "$pkg" >/dev/null; then
                 echo "[$(date '+%H:%M:%S')] [$name] Roblox running..."
             else
-                echo "[$(date '+%H:%M:%S')] [$name] Roblox closed → logging in + rejoining..."
+                echo "[$(date '+%H:%M:%S')] [$name] Roblox closed → opening app & joining..."
                 am start -n "$pkg/com.roblox.client.startup.ActivityStart" >/dev/null 2>&1
                 sleep 3
                 am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
@@ -195,13 +212,12 @@ start_rejoin_loop_no_cookie(){
     package="${apps[$((pkg_index-1))]}"
     echo "Selected package: $package"
 
-    echo -e "\nRejoin started for $package"
     trap 'echo -e "\nStopping rejoin..."; exit 0' INT
     while true; do
         if pidof "$package" >/dev/null; then
             echo "[$(date '+%H:%M:%S')] Roblox running..."
         else
-            echo "[$(date '+%H:%M:%S')] Roblox closed  rejoining..."
+            echo "[$(date '+%H:%M:%S')] Roblox closed → rejoining..."
             url="robloxmobile://placeId=$placeId"
             [[ -n "$jobId" ]] && url="$url&launchData=$jobId"
             am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
@@ -211,6 +227,7 @@ start_rejoin_loop_no_cookie(){
     done
 }
 
+# ------------------ MENU ------------------
 main_menu(){
     clear
     print_banner
@@ -237,6 +254,7 @@ main_menu(){
     esac
 }
 
+# ------------------ DEPENDENCY CHECK ------------------
 for dep in jq curl pm; do
     if ! has_cmd "$dep"; then
         echo "Installing missing dependency: $dep"
